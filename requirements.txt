@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-multipart
+pymupdf
+pymupdf4llm
+rank-bm25
+sentence-transformers
+spacy
+numpy
+transformers
+accelerate
+torch --index-url https://download.pytorch.org/whl/cpu

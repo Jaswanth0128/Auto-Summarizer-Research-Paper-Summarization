@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Research Summarizer</title>
+    <link rel="stylesheet" href="/frontend/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Auto-Summarizer Research Paper Summarization</h1>
+            <p>Upload a Research Paper to generate a verified technical summary.</p>
+        </header>
+
+        <section class="upload-section">
+            <input type="file" id="pdfInput" accept=".pdf" style="display: none;">
+        
+            <div id="dropZone" class="drop-zone">
+                <p>Click or Drag PDF here</p>
+            </div>
+        
+            <button id="processBtn" disabled>Process Paper</button>
+        </section>
+
+        <div id="loading" class="hidden">
+            <div class="spinner"></div>
+            <p>Processing Phases (Extraction -> Polish -> Verify)...</p>
+        </div>
+
+        <main id="output" class="hidden"></main>
+    </div>
+    <script src="/frontend/script.js"></script>
+</body>
+</html>
