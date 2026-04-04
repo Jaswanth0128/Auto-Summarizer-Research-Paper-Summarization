@@ -1,5 +1,6 @@
 shared_data/
 md files/
+poster.html
 **/[Rr][Ee][Aa][Dd][Mm][Ee]*
 
 # Virtual environments
@@ -25,3 +26,4 @@ dist/
 # OS/editor noise
 .DS_Store
 Thumbs.db
+

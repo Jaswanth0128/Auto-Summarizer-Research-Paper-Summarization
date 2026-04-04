@@ -60,6 +60,14 @@ BUCKET_CONTEXT = {
 
 def _build_prompt(bucket_name: str, sentences: str) -> str:
     context = BUCKET_CONTEXT.get(bucket_name, "the content of this section")
+    extra_rule = ""
+    if bucket_name == "Results":
+        extra_rule = (
+            "8. If metric values, comparisons, latency numbers, FPS, throughput values, or table values are present, "
+            "you must preserve every concrete value exactly in the output.\n"
+            "9. Do not replace exact values with vague phrases like better, higher, lower, improved, or comparable when the numbers are available.\n"
+            "10. If the input names multiple metrics together, keep those metric names and their values together in the output.\n"
+        )
     # Strip HTML tags and control tokens from input sentences before building prompt
     sentences = _clean_text(sentences)
     return (
@@ -67,12 +75,13 @@ def _build_prompt(bucket_name: str, sentences: str) -> str:
         f"You are a strict technical summarizer for a research paper section about {context}.\n\n"
         f"RULES:\n"
         f"1. Only use the sentences provided below. Do NOT add anything new.\n"
-        f"2. Do NOT change any numbers, percentages, model names, or metric values. Copy them exactly as they appear.\n"
-        f"3. Cover all important facts — do not skip any metrics, accuracy values, method names, or dataset details.\n"
+        f"2. Do NOT change any numbers, percentages, model names, dataset names, or metric values. Copy them exactly as they appear.\n"
+        f"3. Cover all important facts — do not skip any metrics, accuracy values, method names, dataset details, or quantitative comparisons.\n"
         f"4. Each point must be unique — do not repeat the same fact in different words.\n"
         f"5. Write in simple, clear English. One fact per point.\n"
-        f"6. Generate between 4 to 7 numbered points. Condense the content to fit this range without losing any key facts.\n"
-        f"7. Output numbered points only. No intro, no explanation, nothing else.\n\n"
+        f"6. Generate as many points as needed to cover the full context, typically up to 12 to 15 points. Do not omit key facts just to keep the output short.\n"
+        f"7. Output numbered points only. No intro, no explanation, nothing else.\n"
+        f"{extra_rule}\n"
         f"Sentences:\n{sentences}\n\n"
         f"Numbered summary:\n"
         f"<|end|>\n"

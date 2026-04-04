@@ -232,6 +232,22 @@ _FILLER_PATTERNS = [
     re.compile(r'constructs a useful structure', re.IGNORECASE),
 ]
 
+_METRIC_KEYWORD_RE = re.compile(
+    r'\b(mAP|IoU|precision|recall|F1|accuracy|latency|throughput|FPS|TensorRT|Jetson|Table)\b',
+    re.IGNORECASE,
+)
+
+
+def _is_metric_rich(text: str) -> bool:
+    number_count = len(re.findall(r'\d+(?:\.\d+)?', text))
+    if "|" in text and number_count >= 2:
+        return True
+    if _METRIC_KEYWORD_RE.search(text) and number_count >= 1:
+        return True
+    if re.search(r'\b\d+(?:\.\d+)?\s*(ms|fps|%)\b', text, re.IGNORECASE):
+        return True
+    return False
+
 
 def _sentence_quality(text: str) -> float:
     """Quality multiplier [0.0–1.3]. Penalises vague/filler, rewards metric sentences."""
@@ -241,6 +257,8 @@ def _sentence_quality(text: str) -> float:
     for pat in _FILLER_PATTERNS:
         if pat.search(text):
             return 0.1
+    if _is_metric_rich(text):
+        return 2.0
     has_numbers = bool(re.search(
         r'\d+\.?\d*\s*(%|per\s*cent|accuracy|precision|recall|F1)', text, re.IGNORECASE
     ))
@@ -266,6 +284,11 @@ def extract_top_sentences(chunks_with_weights: List[Tuple[str, float]],
     all_sentences = []
     for chunk_text, weight in chunks_with_weights:
         clean_text = re.sub(r'!\[\]\(.*?\)', '', chunk_text)
+        if bucket_name == "Results":
+            for line in clean_text.splitlines():
+                line = line.strip()
+                if len(line.split()) > 2 and _is_metric_rich(line):
+                    all_sentences.append({"text": line, "weight": weight * 1.3})
         for s in re.split(r'(?<=[.!?])\s+', clean_text):
             s = s.strip()
             if len(s.split()) > 5:
@@ -292,9 +315,23 @@ def extract_top_sentences(chunks_with_weights: List[Tuple[str, float]],
         final_score = scores[i] * s_data["weight"] * quality
         scored.append({"text": s_data["text"], "score": final_score, "index": i})
 
-    scored.sort(key=lambda x: x["score"], reverse=True)
     max_sentences = min(12, max(4, int(len(all_sentences) * summary_ratio)))
-    top_n = scored[:max_sentences]
+    mandatory = []
+    if bucket_name == "Results":
+        metric_candidates = [item for item in scored if _is_metric_rich(item["text"])]
+        metric_candidates.sort(key=lambda x: x["score"], reverse=True)
+        mandatory = metric_candidates[: min(5, max_sentences)]
+
+    chosen_indexes = {item["index"] for item in mandatory}
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    top_n = list(mandatory)
+    for item in scored:
+        if len(top_n) >= max_sentences:
+            break
+        if item["index"] in chosen_indexes:
+            continue
+        top_n.append(item)
+        chosen_indexes.add(item["index"])
 
     # Restore original order (preserve paper's logical sequence)
     top_n.sort(key=lambda x: x["index"])

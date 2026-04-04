@@ -1,1 +1,1 @@
-from .phi3_rewriter import run_rewriting
+from .qwen_rewriter import run_rewriting

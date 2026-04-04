@@ -1,30 +1,22 @@
 document.addEventListener('DOMContentLoaded', () => {
-    const pdfInput  = document.getElementById('pdfInput');
-    const dropZone  = document.getElementById('dropZone');
+    const pdfInput = document.getElementById('pdfInput');
+    const dropZone = document.getElementById('dropZone');
     const processBtn = document.getElementById('processBtn');
-    const output    = document.getElementById('output');
-    const loading   = document.getElementById('loading');
+    const output = document.getElementById('output');
+    const loading = document.getElementById('loading');
     const stepLabel = document.getElementById('stepLabel');
 
     const BUCKET_ORDER = ['Objective', 'Methodology', 'Results', 'Conclusion'];
-
-    // Step labels shown during processing
-    const STEPS = [
-        'Extracting text and tables from PDF…',
-        'Classifying sections into buckets…',
-        'Cleaning and deduplicating sentences…',
-        'Phi-3 Mini is rewriting — this may take 30–60 seconds…',
-    ];
+    const POLL_INTERVAL_MS = 3000;
 
     let selectedFile = null;
-    let stepInterval = null;
+    let isProcessing = false;
 
-    if (!pdfInput || !dropZone || !processBtn || !output || !loading) {
+    if (!pdfInput || !dropZone || !processBtn || !output || !loading || !stepLabel) {
         console.error('Critical: required DOM elements missing.');
         return;
     }
 
-    // ── File selection ──────────────────────────────────────
     dropZone.addEventListener('click', () => pdfInput.click());
 
     pdfInput.addEventListener('change', (e) => {
@@ -69,8 +61,11 @@ document.addEventListener('DOMContentLoaded', () => {
         processBtn.disabled = false;
     }
 
-    // ── Submit ───────────────────────────────────────────────
     processBtn.addEventListener('click', async () => {
+        if (isProcessing) {
+            return;
+        }
+
         const file = selectedFile || pdfInput.files[0];
         if (!file) {
             alert('Please select or drop a PDF first.');
@@ -80,52 +75,74 @@ document.addEventListener('DOMContentLoaded', () => {
         const formData = new FormData();
         formData.append('file', file);
 
+        isProcessing = true;
         loading.classList.remove('hidden');
         output.classList.add('hidden');
+        output.innerHTML = '';
         processBtn.disabled = true;
-
-        // Cycle through step labels so user knows something is happening
-        let stepIndex = 0;
-        if (stepLabel) stepLabel.textContent = STEPS[0];
-        stepInterval = setInterval(() => {
-            stepIndex = Math.min(stepIndex + 1, STEPS.length - 1);
-            if (stepLabel) stepLabel.textContent = STEPS[stepIndex];
-        }, 12000);  // advance label every 12 seconds
+        processBtn.textContent = 'Processing...';
+        dropZone.style.opacity = '0.65';
+        dropZone.style.pointerEvents = 'none';
+        stepLabel.textContent = 'Uploading PDF and creating job...';
 
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 min timeout
-            const response = await fetch("/api/process-paper", {
-              method: "POST",
-              body: formData,
-              signal: controller.signal,
+            const submitResponse = await fetch('/api/process-paper', {
+                method: 'POST',
+                body: formData,
             });
-            clearTimeout(timeoutId);
 
-            let data = null;
-            try { data = await response.json(); }
-            catch (_) { throw new Error('Server returned a non-JSON response.'); }
-
-            if (!response.ok) {
-                throw new Error(data?.detail || 'Paper processing failed.');
+            const submitData = await parseJsonResponse(submitResponse, 'Server returned a non-JSON response while creating the job.');
+            if (!submitResponse.ok) {
+                throw new Error(submitData?.detail || 'Paper processing failed to start.');
             }
 
-            renderReport(data);
-
+            const result = await pollJobUntilComplete(submitData.job_id);
+            renderReport(result);
         } catch (err) {
             console.error('Upload Error:', err);
+            stepLabel.textContent = 'Processing failed.';
             alert(`Error: ${err.message}`);
         } finally {
-            clearInterval(stepInterval);
+            isProcessing = false;
             loading.classList.add('hidden');
             processBtn.disabled = false;
+            processBtn.textContent = 'Process Paper';
+            dropZone.style.opacity = '';
+            dropZone.style.pointerEvents = '';
         }
     });
 
-    // ── Render ───────────────────────────────────────────────
+    async function pollJobUntilComplete(jobId) {
+        if (!jobId) {
+            throw new Error('Missing job ID from server.');
+        }
+
+        while (true) {
+            const response = await fetch(`/api/process-paper/${encodeURIComponent(jobId)}`);
+            const data = await parseJsonResponse(response, 'Server returned a non-JSON response while checking job status.');
+
+            if (!response.ok) {
+                throw new Error(data?.detail || 'Failed to fetch job status.');
+            }
+
+            stepLabel.textContent = data?.step || 'Processing...';
+
+            if (data.status === 'completed') {
+                stepLabel.textContent = 'Completed.';
+                return data;
+            }
+
+            if (data.status === 'failed') {
+                throw new Error(data?.error || 'Paper processing failed.');
+            }
+
+            await delay(POLL_INTERVAL_MS);
+        }
+    }
+
     function renderReport(data) {
         const paperTitle = data?.paper_title || 'Untitled Paper';
-        const summary    = data?.summary || {};
+        const summary = data?.summary || {};
 
         let html = `<h1 class="paper-main-title">${escapeHtml(paperTitle)}</h1>`;
 
@@ -135,21 +152,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
         BUCKET_ORDER.forEach((bucket) => {
             const bucketData = summary[bucket];
-            const points  = Array.isArray(bucketData?.points)  ? bucketData.points  : [];
+            const points = Array.isArray(bucketData?.points) ? bucketData.points : [];
             const rawText = typeof bucketData?.raw_text === 'string' ? bucketData.raw_text : '';
-            const images  = Array.isArray(bucketData?.images)  ? bucketData.images  : [];
+            const images = Array.isArray(bucketData?.images) ? bucketData.images : [];
 
             html += `<div class="bucket-section">`;
             html += `<h2>${escapeHtml(bucket)}</h2>`;
 
-            // Numbered points
             if (points.length > 0) {
                 html += `<ol class="points-list">`;
                 points.forEach((point, i) => {
                     html += `
                         <li>
                             <span class="point-num">${i + 1}</span>
-                            <span>${escapeHtml(highlightNumbers(point))}</span>
+                            <span>${escapeHtml(stripInlineFormatting(point))}</span>
                         </li>`;
                 });
                 html += `</ol>`;
@@ -157,7 +173,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 html += `<p class="empty-note">No content generated for this section.</p>`;
             }
 
-            // Toggle button for raw extracted text
             if (rawText.trim().length > 0) {
                 const toggleId = `raw-${bucket.toLowerCase()}`;
                 html += `
@@ -165,14 +180,13 @@ document.addEventListener('DOMContentLoaded', () => {
                         <span>Show extracted sentences</span>
                         <span class="arrow">▼</span>
                     </button>
-                    <div id="${toggleId}" class="raw-text-panel">${escapeHtml(rawText)}</div>`;
+                    <div id="${toggleId}" class="raw-text-panel">${escapeHtml(stripInlineFormatting(rawText))}</div>`;
             }
 
-            // Images
             if (images.length > 0) {
                 html += `<div class="figure-grid">`;
                 images.forEach((img) => {
-                    const src     = normalizePath(img?.path || '');
+                    const src = normalizePath(img?.path || '');
                     const caption = img?.caption || 'Figure/Table';
                     if (src) {
                         html += `
@@ -193,28 +207,37 @@ document.addEventListener('DOMContentLoaded', () => {
         output.scrollIntoView({ behavior: 'smooth' });
     }
 
-    // ── Helpers ──────────────────────────────────────────────
+    async function parseJsonResponse(response, errorMessage) {
+        try {
+            return await response.json();
+        } catch (_) {
+            throw new Error(errorMessage);
+        }
+    }
+
+    function delay(ms) {
+        return new Promise((resolve) => window.setTimeout(resolve, ms));
+    }
+
     function normalizePath(path) {
         if (!path) return '';
         if (/^https?:\/\//i.test(path)) return path;
         return path.startsWith('/') ? path : `/${path}`;
     }
 
-    // Wrap numbers/percentages in <strong> for emphasis
-    function highlightNumbers(text) {
-        return text.replace(/(\b\d+(?:\.\d+)?%?\b)/g, '<strong>$1</strong>');
+    function stripInlineFormatting(text) {
+        return String(text).replace(/<\/?strong>/gi, '');
     }
 
     function escapeHtml(value) {
         return String(value)
-            .replace(/&/g,  '&amp;')
-            .replace(/</g,  '&lt;')
-            .replace(/>/g,  '&gt;')
-            .replace(/"/g,  '&quot;')
-            .replace(/'/g,  '&#39;');
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
-    // Exposed globally so inline onclick can reach it
     window.toggleRaw = function(panelId, btn) {
         const panel = document.getElementById(panelId);
         if (!panel) return;
