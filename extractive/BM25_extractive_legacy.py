@@ -75,7 +75,6 @@ HEADING_PATTERN = re.compile(
 
 # Singleton model — loaded once, reused across all requests
 _embed_model = None
-HYBRID_ALPHA = 0.6
 
 def _get_embed_model():
     global _embed_model
@@ -84,30 +83,6 @@ def _get_embed_model():
         _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
         print("[Extractive] Embedding model ready.")
     return _embed_model
-
-
-def _minmax_normalize(scores: np.ndarray) -> np.ndarray:
-    """Normalize scores to [0, 1] with a safe constant-vector fallback."""
-    arr = np.asarray(scores, dtype=float)
-    if arr.size == 0:
-        return arr
-    min_v = float(np.min(arr))
-    max_v = float(np.max(arr))
-    if max_v - min_v < 1e-12:
-        return np.ones_like(arr) * 0.5
-    return (arr - min_v) / (max_v - min_v)
-
-
-def _normalize_sentence_key(text: str) -> str:
-    """Normalize sentence text for lightweight duplicate detection."""
-    text = re.sub(r'\s+', ' ', text.strip().lower())
-    text = re.sub(r'[^a-z0-9% ]', '', text)
-    return text
-
-
-def _cosine_similarity_np(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
-    denom = (np.linalg.norm(vec_a) * np.linalg.norm(vec_b)) + 1e-12
-    return float(np.dot(vec_a, vec_b) / denom)
 
 
 def _classify_chunk(chunk_embedding, prototype_embeddings: dict, header: str = "") -> Tuple[str, float]:
@@ -298,12 +273,12 @@ def extract_top_sentences(chunks_with_weights: List[Tuple[str, float]],
                           bucket_name: str,
                           summary_ratio: float = 0.3) -> str:
     """
-    Select top sentences using hybrid ranking.
+    Select top sentences using BM25.
 
-    Hybrid formula:
-        hybrid = alpha * bm25_norm + (1 - alpha) * embedding_norm
-        final  = hybrid * section_weight * sentence_quality
-    with alpha fixed at 0.6.
+    FIX from v2: BM25 query now comes from BUCKET_BM25_QUERIES[bucket_name]
+    (words from the bucket's prototype description) instead of the document's
+    own most-frequent terms. This gives BM25 an external, meaningful signal
+    rather than circular self-scoring.
     """
     if not chunks_with_weights:
         return "Data not found for this section."
@@ -321,18 +296,6 @@ def extract_top_sentences(chunks_with_weights: List[Tuple[str, float]],
             if len(s.split()) > 5:
                 all_sentences.append({"text": s, "weight": weight})
 
-    # Remove duplicate candidates early; keep the strongest weight for each normalized sentence.
-    dedup = {}
-    for s_data in all_sentences:
-        key = _normalize_sentence_key(s_data["text"])
-        if not key:
-            continue
-        if key in dedup:
-            dedup[key]["weight"] = max(dedup[key]["weight"], s_data["weight"])
-        else:
-            dedup[key] = {"text": s_data["text"], "weight": s_data["weight"]}
-    all_sentences = list(dedup.values())
-
     if len(all_sentences) <= 5:
         return " ".join(s["text"] for s in all_sentences)
 
@@ -346,81 +309,28 @@ def extract_top_sentences(chunks_with_weights: List[Tuple[str, float]],
         query = [term for term, _ in Counter(all_tokens).most_common(20)]
 
     bm25 = BM25Okapi(tokenized)
-    bm25_scores = np.asarray(bm25.get_scores(query), dtype=float)
-    bm25_norm = _minmax_normalize(bm25_scores)
-
-    embedding_norm = np.ones_like(bm25_norm) * 0.5
-    sentence_embeddings_np = None
-    try:
-        model = _get_embed_model()
-        sentence_texts = [s["text"] for s in all_sentences]
-        sentence_embeddings = model.encode(sentence_texts, convert_to_tensor=True)
-
-        proto_text = BUCKET_PROTOTYPES.get(bucket_name, "")
-        if proto_text:
-            bucket_embedding = model.encode(proto_text, convert_to_tensor=True)
-            cosine_scores = util.cos_sim(sentence_embeddings, bucket_embedding).squeeze(-1)
-            if hasattr(cosine_scores, "cpu"):
-                cosine_scores = cosine_scores.cpu().numpy()
-            embedding_norm = _minmax_normalize(np.asarray(cosine_scores, dtype=float))
-
-        if hasattr(sentence_embeddings, "cpu"):
-            sentence_embeddings_np = sentence_embeddings.cpu().numpy()
-        else:
-            sentence_embeddings_np = np.asarray(sentence_embeddings, dtype=float)
-    except Exception as e:
-        # Keep pipeline running with BM25-only signal if embedding scoring fails.
-        print(f"[Extractive] Warning: embedding scoring fallback to BM25-only for '{bucket_name}': {e}")
+    scores = bm25.get_scores(query)
 
     scored = []
     for i, s_data in enumerate(all_sentences):
         quality = _sentence_quality(s_data["text"])
-        hybrid_score = (HYBRID_ALPHA * bm25_norm[i]) + ((1.0 - HYBRID_ALPHA) * embedding_norm[i])
-        final_score = hybrid_score * s_data["weight"] * quality
+        final_score = scores[i] * s_data["weight"] * quality
         scored.append({"text": s_data["text"], "score": final_score, "index": i})
 
-    max_sentences = min(8, max(4, int(len(all_sentences) * summary_ratio)))
+    max_sentences = min(12, max(4, int(len(all_sentences) * summary_ratio)))
     mandatory = []
     if bucket_name == "Results":
         metric_candidates = [item for item in scored if _is_metric_rich(item["text"])]
         metric_candidates.sort(key=lambda x: x["score"], reverse=True)
         mandatory = metric_candidates[: min(5, max_sentences)]
 
-    chosen_indexes = set()
+    chosen_indexes = {item["index"] for item in mandatory}
     scored.sort(key=lambda x: x["score"], reverse=True)
-
-    def _is_redundant(candidate_index: int, selected_indexes: set) -> bool:
-        if not selected_indexes:
-            return False
-        if sentence_embeddings_np is not None:
-            cand_vec = sentence_embeddings_np[candidate_index]
-            for idx in selected_indexes:
-                if _cosine_similarity_np(cand_vec, sentence_embeddings_np[idx]) >= 0.88:
-                    return True
-        candidate_key = _normalize_sentence_key(all_sentences[candidate_index]["text"])
-        for idx in selected_indexes:
-            selected_key = _normalize_sentence_key(all_sentences[idx]["text"])
-            if candidate_key == selected_key:
-                return True
-        return False
-
-    top_n = []
-    for item in mandatory:
-        if len(top_n) >= max_sentences:
-            break
-        if item["index"] in chosen_indexes:
-            continue
-        if _is_redundant(item["index"], chosen_indexes):
-            continue
-        top_n.append(item)
-        chosen_indexes.add(item["index"])
-
+    top_n = list(mandatory)
     for item in scored:
         if len(top_n) >= max_sentences:
             break
         if item["index"] in chosen_indexes:
-            continue
-        if _is_redundant(item["index"], chosen_indexes):
             continue
         top_n.append(item)
         chosen_indexes.add(item["index"])

@@ -1,3 +1,5 @@
+# qwen_rewriter.py
+
 import json
 import os
 import re
@@ -67,6 +69,7 @@ def _build_prompt(bucket_name: str, sentences: str) -> str:
             "you must preserve every concrete value exactly in the output.\n"
             "9. Do not replace exact values with vague phrases like better, higher, lower, improved, or comparable when the numbers are available.\n"
             "10. If the input names multiple metrics together, keep those metric names and their values together in the output.\n"
+            "11. Do not repeat the same metric pair (for example the same train/validation values) in more than one point.\n"
         )
     # Strip HTML tags and control tokens from input sentences before building prompt
     sentences = _clean_text(sentences)
@@ -78,9 +81,10 @@ def _build_prompt(bucket_name: str, sentences: str) -> str:
         f"2. Do NOT change any numbers, percentages, model names, dataset names, or metric values. Copy them exactly as they appear.\n"
         f"3. Cover all important facts — do not skip any metrics, accuracy values, method names, dataset details, or quantitative comparisons.\n"
         f"4. Each point must be unique — do not repeat the same fact in different words.\n"
-        f"5. Write in simple, clear English. One fact per point.\n"
-        f"6. Generate as many points as needed to cover the full context, typically up to 12 to 15 points. Do not omit key facts just to keep the output short.\n"
-        f"7. Output numbered points only. No intro, no explanation, nothing else.\n"
+        f"5. If two sentences express the same idea, keep only the clearer one and drop the duplicate.\n"
+        f"6. Write in simple, clear English. One fact per point.\n"
+        f"7. Generate as many points as needed to cover the full context, typically up to 8 points. Do not omit key facts just to keep the output short.\n"
+        f"8. Output numbered points only. No intro, no explanation, nothing else.\n"
         f"{extra_rule}\n"
         f"Sentences:\n{sentences}\n\n"
         f"Numbered summary:\n"
